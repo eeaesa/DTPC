@@ -1,3 +1,4 @@
+import os
 
 import numpy as np
 from scipy.spatial import KDTree
@@ -45,34 +46,19 @@ def calculate_metric_percase_volume(pred, gt):
     if pred.sum() > 0 and gt.sum() > 0:
         dice = metric.binary.dc(pred, gt)
         hd95 = metric.binary.hd95(pred, gt)
-        jaccard = metric.binary.jc(pred, gt)  # Jaccard指数
-        asd = metric.binary.asd(pred, gt)     # 平均表面距离
+        jaccard = metric.binary.jc(pred, gt)  
+        asd = metric.binary.asd(pred, gt)    
         return dice, hd95, jaccard, asd
     else:
         return 0, 0, 0, 0
 
 #--------------2d RGB metric cal---------------------
 def cal_metric_pixel_2D(image, label, net, classes, patch_size=256):
-    '''
-    2d版本的指标计算
 
-    参数:
-        image: 输入图像，形状为 [B, C, H, W] 的torch张量
-        label: 真实标签，形状为 [B, H, W] 的torch张量
-        net: 用于预测的神经网络模型
-        classes: 类别数量（包括背景0类）
-        patch_size: 模型输入尺寸，默认为256
-
-    返回:
-        metric_list: 每个非0类的指标列表，格式为[[Dice,Jaccard,HD95,ASD], ...]
-        PA: 整体像素准确率
-    '''
-    # 将数据转为numpy并初始化预测结果
     image = image.cpu().detach().numpy()
     label = label.cpu().detach().numpy()
     prediction = np.zeros_like(label)
 
-    # 逐片预测并调整大小
     for ind in range(image.shape[0]):
         slice = image[ind]
         x, y = slice.shape[1], slice.shape[2]
@@ -87,84 +73,58 @@ def cal_metric_pixel_2D(image, label, net, classes, patch_size=256):
             pred = zoom(out, (x / patch_size, y / patch_size), order=0)
             prediction[ind] = pred
 
-    # 计算PA
     PA = np.sum(prediction == label) / label.size
 
-    # 初始化指标列表（只计算非0类）
     metric_list = []
 
-    # 计算每个非0类的指标
     for cls in range(1, classes):
-        # 获取当前类别的二值mask
         pred_mask = (prediction == cls).astype(np.uint8)
         gt_mask = (label == cls).astype(np.uint8)
 
-        # 计算Dice和Jaccard
         intersection = np.sum(pred_mask * gt_mask)
         pred_sum = np.sum(pred_mask)
         gt_sum = np.sum(gt_mask)
 
-        # Dice计算
         if pred_sum + gt_sum == 0:
             dice = 1.0
         else:
             dice = (2. * intersection) / (pred_sum + gt_sum)
 
-        # Jaccard计算
         union = pred_sum + gt_sum - intersection
         if union == 0:
             jaccard = 1.0
         else:
             jaccard = intersection / union
 
-        # 计算HD95和ASD
         hd95, asd = compute_hd95_asd_2d(pred_mask, gt_mask)
 
-        # 将当前类别的指标添加到列表中
         metric_list.append([dice, jaccard, hd95, asd])
 
     return metric_list, PA
 
 
 def compute_hd95_asd_2d(pred_mask, gt_mask, return_diagonal=False):
-    """
-    计算2D图像的HD95和ASD（优化合并版本）
 
-    参数:
-        pred_mask: 预测分割掩码（0-1二值矩阵）
-        gt_mask: 真实分割掩码（0-1二值矩阵）
-        return_diagonal: 是否在空掩码时返回图像对角线长度
-
-    返回:
-        hd95, asd 或 (nan, nan)/(diagonal, diagonal)
-    """
-    # 验证输入
     pred_mask = pred_mask.astype(np.uint8) if pred_mask.dtype != np.uint8 else pred_mask
     gt_mask = gt_mask.astype(np.uint8) if gt_mask.dtype != np.uint8 else gt_mask
 
-    # 提取轮廓点
     pred_contour = np.argwhere(binary_erosion(pred_mask) ^ pred_mask)
     gt_contour = np.argwhere(binary_erosion(gt_mask) ^ gt_mask)
 
-    # 处理空掩码情况
     if len(pred_contour) == 0 or len(gt_contour) == 0:
         if return_diagonal:
             diagonal = np.sqrt(pred_mask.shape[0] ** 2 + pred_mask.shape[1] ** 2)
             return diagonal, diagonal
         return np.nan, np.nan
 
-    # 构建KDTree
     gt_tree = KDTree(gt_contour)
     pred_tree = KDTree(pred_contour)
 
-    # 计算双向距离
     d_pred_to_gt, _ = gt_tree.query(pred_contour)
     d_gt_to_pred, _ = pred_tree.query(gt_contour)
 
-    # 计算HD95
     hd95 = max(np.percentile(d_pred_to_gt, 95), np.percentile(d_gt_to_pred, 95))
 
-    # 计算ASD
     asd = (np.mean(d_pred_to_gt) + np.mean(d_gt_to_pred)) / 2
 
     return hd95, asd
@@ -172,36 +132,19 @@ def compute_hd95_asd_2d(pred_mask, gt_mask, return_diagonal=False):
 from scipy.stats import t
 
 def compute_confidence_interval(data, confidence=0.95):
-    """
-    计算给定数据的均值、标准差、95%置信区间
-    输入:
-        data: 包含数值的列表或 NumPy 数组（允许 NaN 值）
-        confidence: 置信度（默认 0.95）
-    输出:
-        mean_val: 均值
-        std_val: 标准差
-        ci_lower: 置信区间下限
-        ci_upper: 置信区间上限
-    """
-    # 转换为 NumPy 数组，并过滤 NaN
     data = np.array(data)
-    data = data[~np.isnan(data)]  # 移除 NaN
+    data = data[~np.isnan(data)]
 
     if len(data) == 0:
-        return np.nan, np.nan, np.nan, np.nan  # 数据为空时返回 NaN
+        return np.nan, np.nan, np.nan, np.nan
 
-    # 计算均值和标准差（样本标准差，ddof=1）
     mean_val = np.nanmean(data)
-    std_val = np.nanstd(data, ddof=1)  # ddof=1 表示样本标准差（无偏估计）
-
-    # 计算置信区间（使用 t 分布，适用于小样本）
+    std_val = np.nanstd(data, ddof=1)
     n = len(data)
     if n > 1:
-        # 使用 t 分布（更准确）
         t_critical = t.ppf((1 + confidence) / 2, df=n - 1)
         margin_of_error = t_critical * (std_val / np.sqrt(n))
     else:
-        # 单个样本无法计算置信区间
         margin_of_error = 0.0
 
     ci_lower = mean_val - margin_of_error
@@ -210,3 +153,186 @@ def compute_confidence_interval(data, confidence=0.95):
     return mean_val, std_val, ci_lower, ci_upper
 
 
+#---------------3d----------------
+import h5py
+from collections import OrderedDict
+from tqdm import tqdm
+import nibabel as nib
+import pandas as pd
+import math
+import torch.nn.functional as F
+
+def test_all_case(
+    net,
+    image_list,
+    num_classes,
+    patch_size=(112, 112, 80),
+    stride_xy=18,
+    stride_z=4,
+    save_result=True,
+    test_save_path=None,
+    preproc_fn=None,
+):
+    total_metric = 0.0
+    metric_dict = OrderedDict()
+    metric_dict["name"] = list()
+    metric_dict["dice"] = list()
+    metric_dict["jaccard"] = list()
+    metric_dict["asd"] = list()
+    metric_dict["95hd"] = list()
+    for image_path in tqdm(image_list):
+    # for image_path in image_list:
+        case_name = image_path.split("/")[-2]
+        id = image_path.split("/")[-1]
+        h5f = h5py.File(image_path, "r")
+        image = h5f["image"][:]
+        label = h5f["label"][:]
+        if preproc_fn is not None:
+            image = preproc_fn(image)
+        prediction, score_map = test_single_case(
+            net, image, stride_xy, stride_z, patch_size, num_classes=num_classes
+        )
+
+        if np.sum(prediction) == 0:
+            single_metric = (0, 0, 0, 0)
+        else:
+            single_metric = calculate_metric_percase(prediction, label[:])
+            metric_dict["name"].append(case_name)
+            metric_dict["dice"].append(single_metric[0])
+            metric_dict["jaccard"].append(single_metric[1])
+            metric_dict["asd"].append(single_metric[2])
+            metric_dict["95hd"].append(single_metric[3])
+            # print(metric_dict)
+
+        total_metric += np.asarray(single_metric)
+
+        if save_result:
+            test_save_path_temp = os.path.join(test_save_path, case_name)
+            if not os.path.exists(test_save_path_temp):
+                os.makedirs(test_save_path_temp)
+            nib.save(
+                nib.Nifti1Image(prediction.astype(np.float32), np.eye(4)),
+                test_save_path_temp + "/" + id + "_pred.nii.gz",
+            )
+            nib.save(
+                nib.Nifti1Image(image[:].astype(np.float32), np.eye(4)),
+                test_save_path_temp + "/" + id + "_img.nii.gz",
+            )
+            nib.save(
+                nib.Nifti1Image(label[:].astype(np.float32), np.eye(4)),
+                test_save_path_temp + "/" + id + "_gt.nii.gz",
+            )
+    avg_metric = total_metric / len(image_list)
+    if save_result:
+        metric_csv = pd.DataFrame(metric_dict)
+        metric_csv.to_csv(test_save_path + "/metric.csv", index=False)
+    print("average metric is {}".format(avg_metric))
+
+    return avg_metric
+
+def test_single_case(net, image, stride_xy, stride_z, patch_size, num_classes=1):
+    w, h, d = image.shape
+
+    # if the size of image is less than patch_size, then padding it
+    add_pad = False
+    if w < patch_size[0]:
+        w_pad = patch_size[0] - w
+        add_pad = True
+    else:
+        w_pad = 0
+    if h < patch_size[1]:
+        h_pad = patch_size[1] - h
+        add_pad = True
+    else:
+        h_pad = 0
+    if d < patch_size[2]:
+        d_pad = patch_size[2] - d
+        add_pad = True
+    else:
+        d_pad = 0
+    wl_pad, wr_pad = w_pad // 2, w_pad - w_pad // 2
+    hl_pad, hr_pad = h_pad // 2, h_pad - h_pad // 2
+    dl_pad, dr_pad = d_pad // 2, d_pad - d_pad // 2
+    if add_pad:
+        image = np.pad(
+            image,
+            [(wl_pad, wr_pad), (hl_pad, hr_pad), (dl_pad, dr_pad)],
+            mode="constant",
+            constant_values=0,
+        )
+    ww, hh, dd = image.shape
+
+    sx = math.ceil((ww - patch_size[0]) / stride_xy) + 1
+    sy = math.ceil((hh - patch_size[1]) / stride_xy) + 1
+    sz = math.ceil((dd - patch_size[2]) / stride_z) + 1
+    # print("{}, {}, {}".format(sx, sy, sz))
+    score_map = np.zeros((num_classes,) + image.shape).astype(np.float32)
+    cnt = np.zeros(image.shape).astype(np.float32)
+
+    for x in range(0, sx):
+        xs = min(stride_xy * x, ww - patch_size[0])
+        for y in range(0, sy):
+            ys = min(stride_xy * y, hh - patch_size[1])
+            for z in range(0, sz):
+                zs = min(stride_z * z, dd - patch_size[2])
+                test_patch = image[
+                    xs : xs + patch_size[0],
+                    ys : ys + patch_size[1],
+                    zs : zs + patch_size[2],
+                ]
+                test_patch = np.expand_dims(
+                    np.expand_dims(test_patch, axis=0), axis=0
+                ).astype(np.float32)
+                test_patch = torch.from_numpy(test_patch).cuda()
+                y1 = net(test_patch)
+                # CRKD, URPC, MLRPL
+                if isinstance(y1, list) or isinstance(y1, tuple):
+                    y1 = y1[0]
+
+                y = F.softmax(y1, dim=1)
+                y = y.cpu().data.numpy()
+                y = y[0, :, :, :, :]
+                score_map[
+                    :,
+                    xs : xs + patch_size[0],
+                    ys : ys + patch_size[1],
+                    zs : zs + patch_size[2],
+                ] = (
+                    score_map[
+                        :,
+                        xs : xs + patch_size[0],
+                        ys : ys + patch_size[1],
+                        zs : zs + patch_size[2],
+                    ]
+                    + y
+                )
+                cnt[
+                    xs : xs + patch_size[0],
+                    ys : ys + patch_size[1],
+                    zs : zs + patch_size[2],
+                ] = (
+                    cnt[
+                        xs : xs + patch_size[0],
+                        ys : ys + patch_size[1],
+                        zs : zs + patch_size[2],
+                    ]
+                    + 1
+                )
+    score_map = score_map / np.expand_dims(cnt, axis=0)
+    label_map = np.argmax(score_map, axis=0)
+    if add_pad:
+        label_map = label_map[
+            wl_pad : wl_pad + w, hl_pad : hl_pad + h, dl_pad : dl_pad + d
+        ]
+        score_map = score_map[
+            :, wl_pad : wl_pad + w, hl_pad : hl_pad + h, dl_pad : dl_pad + d
+        ]
+    return label_map, score_map
+
+def calculate_metric_percase(pred, gt):
+    dice = metric.binary.dc(pred, gt)
+    jc = metric.binary.jc(pred, gt)
+    hd = metric.binary.hd95(pred, gt)
+    asd = metric.binary.asd(pred, gt)
+
+    return dice, jc, hd, asd
